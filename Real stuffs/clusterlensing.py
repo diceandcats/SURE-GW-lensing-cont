@@ -64,7 +64,7 @@ class ClusterLensing:
 
         return D_S1, D_S2, D_LS1, D_LS2
 
-    def find_rough_def_pix(self, x_src, y_src):    # result are in pixel
+    def find_rough_def_pix_old(self, x_src, y_src):    # result are in pixel
         """
         Find the pixels that can ray-trace back to the source position roughly.
         """
@@ -93,6 +93,91 @@ class ClusterLensing:
         #plt.scatter([i[0]*pixscale for i in coordinates], [i[1]*pixscale for i in coordinates], c='r', s=1)
         #plt.scatter(coord[0]*pixscale, coord[1]*pixscale, c='b', s=1)
         return coordinates   # in pixel
+
+    def find_rough_def_pix_round(self, x_src, y_src):
+        """
+        Find the pixels that can ray-trace back to the source position roughly.
+        """
+        alpha_x = self.alpha_map_x  # Deflection maps in pixels
+        alpha_y = self.alpha_map_y
+
+        # Source coordinates and their fractional parts
+        coord_x_r, coord_y_r = x_src % 1, y_src % 1
+        x_round, y_round = round(x_src), round(y_src)
+
+        eps = 1e-8  # Tolerance for floating-point comparison
+        is_half_x = np.isclose(coord_x_r, 0.5, atol=eps)
+        is_half_y = np.isclose(coord_y_r, 0.5, atol=eps)
+
+        # Possible rounded values for source positions
+        x_possible_rounds = [x_round, x_round - 1] if is_half_x else [x_round]
+        y_possible_rounds = [y_round, y_round - 1] if is_half_y else [y_round]
+
+        size = self.size
+
+        # Create grid indices for the entire image
+        i_indices, j_indices = np.indices((size, size))
+
+        # Compute deflected positions (source plane coordinates)
+        ycoord = i_indices - alpha_y
+        xcoord = j_indices - alpha_x
+
+        # Round the deflected positions
+        rounded_ycoord = np.round(ycoord)
+        rounded_xcoord = np.round(xcoord)
+
+        # Create boolean masks where the rounded positions match the possible source positions
+        x_mask = np.isin(rounded_xcoord, x_possible_rounds)
+        y_mask = np.isin(rounded_ycoord, y_possible_rounds)
+        mask = x_mask & y_mask
+
+        # Extract the coordinates where the mask is True
+        i_coords, j_coords = np.where(mask)
+
+        # Return the coordinates in (x, y) format
+        coordinates = list(zip(j_coords, i_coords))
+
+        return coordinates  # Coordinates are in pixels
+
+
+    def find_rough_def_pix(self, x_src, y_src, threshold=0.7):
+        """
+        Find the pixels that can ray-trace back to the source position within a distance less than 1 pixel.
+
+        Parameters:
+        ---------------
+        x_src: The x-coordinate of the source in pixels.
+        y_src: The y-coordinate of the source in pixels.
+
+        Returns:
+        ---------------
+        coordinates: List of pixel coordinates (x, y) that ray-trace back to within 1 pixel of the source position.
+        """
+        alpha_x = self.alpha_map_x  # Deflection maps in pixels
+        alpha_y = self.alpha_map_y
+
+        size = self.size
+
+        # Create grid indices for the entire image
+        i_indices, j_indices = np.indices((size, size))
+
+        # Compute deflected positions (source plane coordinates)
+        y_deflected = i_indices - alpha_y
+        x_deflected = j_indices - alpha_x
+
+        # Compute the Euclidean distances between deflected positions and the source position
+        distances = np.sqrt((x_deflected - x_src) ** 2 + (y_deflected - y_src) ** 2)
+
+        # Create a mask where the distance is less than 1 pixel
+        mask = distances < threshold
+
+        # Extract the coordinates where the mask is True
+        i_coords, j_coords = np.where(mask)
+
+        # Return the coordinates in (x, y) format
+        coordinates = list(zip(j_coords, i_coords))
+
+        return coordinates  # Coordinates are in pixels
 
     def def_angle_interpolate(self, x,y, alpha_x= None, alpha_y = None):  #(x,y) is img_guess
         """
@@ -136,10 +221,24 @@ class ClusterLensing:
             if label != -1:
                 images[f"Image_{label}"] = coordinates[labels == label]
         images = list(images.values())
+
+        if len(images) <= 1:
+            images=[]
+            coordinates = np.array(self.find_rough_def_pix(x_src, y_src, threshold=1.5))
+            if len(coordinates) == 0:
+                return []
+            dbscan = DBSCAN(eps=3, min_samples=1).fit(coordinates)
+            labels = dbscan.labels_
+            images = {}
+            for label in set(labels):
+                if label != -1:
+                    images[f"Image_{label}"] = coordinates[labels == label]
+            images = list(images.values())
+    
         return images
 
 
-    def get_image_positions(self, x_src, y_src, pixscale = None):
+    def get_image_positions(self, x_src, y_src, pixscale=None):
         """
         Get the image positions of the source.
 
@@ -153,37 +252,41 @@ class ClusterLensing:
         ---------------
         image_positions: The image positions of the source in arcsec.
         """
-        pixscale = self.pixscale
-        x_src = x_src / pixscale
-        y_src = y_src / pixscale
+        pixscale = self.pixscale if pixscale is None else pixscale
+        x_src /= pixscale
+        y_src /= pixscale
         images = self.clustering(x_src, y_src)
 
-        #for i in range(len(images)):
-            #plt.scatter(images[i][:,0], images[i][:,1], s=0.5)
-        #print(f'Number of pixels: {[np.sum(len(images[i])) for i in range(len(images))]}')
-
-        # Get the image positions
-        #plt.scatter(self.x_src* pixscale, self.y_src* pixscale, c='b')                                            #plot in arcsec
-        #plt.scatter([i[0]* pixscale for i in coordinates], [i[1]* pixscale for i in coordinates], c='y', s=5)     #plot in arcsec
-
-        img = [[] for _ in range(len(images))]
+        img = []
 
         def wrap_diff_interpolate(img_guess):
             return self.diff_interpolate(img_guess, x_src, y_src)
 
+        for image in images:
+            x_max, x_min = np.max(image[:, 0]), np.min(image[:, 0])
+            y_max, y_min = np.max(image[:, 1]), np.min(image[:, 1])
+            img_guess = (
+                np.random.uniform(x_min, x_max),
+                np.random.uniform(y_min, y_max)
+            )
+            res = minimize.minimize(
+                wrap_diff_interpolate,
+                img_guess,
+                bounds=[(x_min - 0.7, x_max + 0.7), (y_min - 0.7, y_max + 0.7)],
+                method='L-BFGS-B',
+                tol=1e-9
+            )
+            # Check if the minimized diff_interpolate is less than 0.01
+            diff_value = self.diff_interpolate(res.x, x_src, y_src)
+            if diff_value < 0.05:
+                img.append((res.x[0] * pixscale, res.x[1] * pixscale))  # in arcsec
 
-        for i, image in enumerate(images):
-            x_max, x_min = np.max(image[:,0]), np.min(image[:,0])
-            y_max, y_min = np.max(image[:,1]), np.min(image[:,1])
-            img_guess = (np.random.uniform(x_min, x_max), np.random.uniform(y_min, y_max))
-            pos = minimize.minimize(wrap_diff_interpolate, img_guess, bounds =[(x_min-1.5, x_max+1.5), (y_min-1.5, y_max+1.5)], method='L-BFGS-B', tol=1e-9) # the 2 is for wider boundary
-            #print(x_min* pixscale, x_max* pixscale, y_min* pixscale, y_max* pixscale, pos.x* pixscale, self.diff_interpolate(pos.x))
-            #plt.scatter(pos.x[0]* pixscale, pos.x[1]* pixscale, c='g', s=10, marker='x')
-            img[i] = (pos.x[0]* pixscale, pos.x[1]*pixscale)   # in arcsec
-            
         img = sorted(img, key=lambda x: x[0])
-        
-        return img              # in arcsec
+
+        return img  # in arcsec
+
+
+
 
     def partial_derivative(self, func, var, point, h = 1e-9):
         """
@@ -385,7 +488,47 @@ class ClusterLensing:
             #print(f"Time-delay distance: {time_delay_distance.value}")
             #print(f"Numerical time delay in days: {dt_days} days")
             return dt_days
+        
+    
+    def ray_trace_and_print_distances(self, x_src, y_src):
+        """
+        Ray-trace the pixels for locations where x-coordinate is between 283 to 287,
+        and y-coordinate between 324 to 328, and print the distances between the
+        ray-traced coordinates and the inputted source location.
 
+        Parameters:
+        ---------------
+        x_src: The x-coordinate of the source in pixels.
+        y_src: The y-coordinate of the source in pixels.
+        """
+        alpha_x = self.alpha_map_x  # Deflection maps in pixels
+        alpha_y = self.alpha_map_y
+
+        # Define the ranges
+        x_min, x_max = 283, 287
+        y_min, y_max = 324, 328
+
+        # Generate arrays of x and y indices within the specified ranges
+        y_indices, x_indices = np.mgrid[y_min:y_max+1, x_min:x_max+1]
+
+        # Flatten the indices arrays
+        y_indices_flat = y_indices.flatten()
+        x_indices_flat = x_indices.flatten()
+
+        # Get the alpha_x and alpha_y values at these indices
+        alpha_x_values = alpha_x[y_indices_flat, x_indices_flat]
+        alpha_y_values = alpha_y[y_indices_flat, x_indices_flat]
+
+        # Compute deflected positions (source plane coordinates)
+        x_deflected = x_indices_flat - alpha_x_values
+        y_deflected = y_indices_flat - alpha_y_values
+
+        # Compute the Euclidean distances between deflected positions and the source position
+        distances = np.sqrt((x_deflected - x_src) ** 2 + (y_deflected - y_src) ** 2)
+
+        # Print the distances
+        for idx in range(len(distances)):
+            print(f"Pixel ({x_indices_flat[idx]}, {y_indices_flat[idx]}): Distance = {distances[idx]} pixels")
 
 
         
