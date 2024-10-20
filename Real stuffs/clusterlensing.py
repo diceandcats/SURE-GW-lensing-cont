@@ -8,6 +8,8 @@ import scipy.optimize._minimize as minimize
 from astropy.cosmology import FlatLambdaCDM
 import lenstronomy.Util.constants as const
 import pandas as pd
+from lenstronomy.LensModel.lens_model import LensModel
+from lenstronomy.LensModel.Solver.lens_equation_solver import LensEquationSolver
 
 # pylint: disable=C0103
 class ClusterLensing:
@@ -15,7 +17,8 @@ class ClusterLensing:
     Class to get the lensing properties of a cluster by deflection and lens potential map of the cluster.
     """
 
-    def __init__(self, alpha_map_x, alpha_map_y, lens_potential_map, z_l , z_s, pixscale, size, diff_z = False):
+    def __init__(self, alpha_map_x, alpha_map_y, lens_potential_map, z_l ,
+                z_s, pixscale, size, diff_z = False, lensmodel = None):
         """
         Parameters:
         ---------------
@@ -38,6 +41,14 @@ class ClusterLensing:
         self.magnifications = None
         self.time_delays = None
         self.diff_z = diff_z
+
+        x_grid = np.linspace(0, size-1, size)*pixscale
+        lens_model = ['INTERPOL']
+        self.kwargs = [{'grid_interp_x': x_grid, 'grid_interp_y': x_grid,
+                          'f_': lens_potential_map,
+                          'f_x': alpha_map_x, 'f_y': alpha_map_y}]
+        lensmodel = LensModel(lens_model_list=lens_model)
+        self.solver = LensEquationSolver(lensmodel)
 
         if diff_z:
             self.D_S1, self.D_S2, self.D_LS1, self.D_LS2 = self.scaling()
@@ -179,6 +190,14 @@ class ClusterLensing:
 
         return coordinates  # Coordinates are in pixels
 
+    def find_rough_def_pix_lenstronomy(self, x_src, y_src):   # result are in pixel
+        '''
+        Lenstronomy
+        '''
+        coordinates = self.solver.candidate_solutions(x_src, y_src, self.kwargs)
+        return coordinates
+
+
     def def_angle_interpolate(self, x,y, alpha_x= None, alpha_y = None):  #(x,y) is img_guess
         """
         Interpolate the deflection angle at the image position.
@@ -253,7 +272,7 @@ class ClusterLensing:
         image_positions: The image positions of the source in arcsec.
         """
         pixscale = self.pixscale if pixscale is None else pixscale
-        x_src /= pixscale
+        x_src /= pixscale #pixel
         y_src /= pixscale
         images = self.clustering(x_src, y_src)
 
@@ -278,14 +297,59 @@ class ClusterLensing:
             )
             # Check if the minimized diff_interpolate is less than 0.01
             diff_value = self.diff_interpolate(res.x, x_src, y_src)
-            if diff_value < 0.05:
+            if diff_value < 0.025:
                 img.append((res.x[0] * pixscale, res.x[1] * pixscale))  # in arcsec
 
         img = sorted(img, key=lambda x: x[0])
 
         return img  # in arcsec
 
+    def get_image_positions_lenstronomy(self, x_src, y_src, pixscale=None):
+        """
+        Get the image positions of the source.
 
+        Parameters:
+        ---------------
+        x_src: The x coordinate of the source in arcsec.
+        y_src: The y coordinate of the source in arcsec.
+        pixscale: The pixel scale of the deflection map in arcsec/pixel.
+
+        Returns:
+        ---------------
+        image_positions: The image positions of the source in arcsec.
+        """
+        pixscale = self.pixscale if pixscale is None else pixscale
+        x_pix, y_pix, _, _ = self.find_rough_def_pix_lenstronomy(x_src, y_src)
+        x_pix = x_pix / pixscale
+        y_pix = y_pix / pixscale
+        images = [np.array([[x, y]]) for x, y in zip(x_pix, y_pix)]
+        img = []
+
+        def wrap_diff_interpolate(img_guess):
+            return self.diff_interpolate(img_guess, x_src/ pixscale, y_src/pixscale)
+
+        for image in images:
+            x_max, x_min = np.max(image[:, 0]), np.min(image[:, 0])
+            y_max, y_min = np.max(image[:, 1]), np.min(image[:, 1])
+            img_guess = (
+                np.random.uniform(x_min, x_max),
+                np.random.uniform(y_min, y_max)
+            )
+            res = minimize.minimize(
+                wrap_diff_interpolate,
+                img_guess,
+                bounds=[(x_min - 7, x_max + 7), (y_min - 7, y_max + 7)],
+                method='L-BFGS-B',
+                tol=1e-7
+            )
+            # Check if the minimized diff_interpolate is less than 0.01
+            diff_value = self.diff_interpolate(res.x, x_src/pixscale, y_src/pixscale)
+            if diff_value < 0.025:
+                img.append((res.x[0] * pixscale, res.x[1] * pixscale))  # in arcsec
+
+        img = sorted(img, key=lambda x: x[0])
+
+        return img  # in arcsec
 
 
     def partial_derivative(self, func, var, point, h = 1e-9):
